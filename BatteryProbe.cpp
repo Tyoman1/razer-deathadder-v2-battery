@@ -623,14 +623,6 @@ int main()
 
     int candidate_idx = -1;
 
-    for (size_t i = 0; i < devices.size(); i++)
-    {
-        const auto& d = devices[i];
-        bool mouse = d.IsMouse();
-        bool kbd = d.IsKeyboard();
-        bool batt_candidate = d.IsRazerBatteryCandidate();
-        if (batt_candidate && candidate_idx < 0) candidate_idx = (int)i;
-
         char pid_str[16];
         sprintf_s(pid_str, "0x%04X", d.pid);
 
@@ -644,85 +636,97 @@ int main()
                batt_candidate ? "CAND" : "");
     }
 
-    /* Phase 2: try accessing a battery candidate */
-    if (candidate_idx < 0)
+    /* Phase 2: try battery read on ALL interfaces */
+    printf("\n=== Phase 2: Battery Read Attempt ===\n");
+    printf("(Trying every interface with FeatLen >= 64 or that can be opened)\n\n");
+
+    for (size_t ci = 0; ci < devices.size(); ci++)
     {
-        printf("\nNo battery candidate found.\n");
-        printf("(No HID collection with vendor usage page or Interface 2 with 90-byte reports)\n");
-    }
-    else
-    {
-        const auto& target = devices[candidate_idx];
-        printf("\n=== Phase 2: Battery Read Attempt ===\n");
-        printf("Selected candidate [%d]:\n", candidate_idx);
-        printf("  Path:   %s\n", target.path.c_str());
-        printf("  PID:    0x%04X\n", target.pid);
-        printf("  MI/IF:  %d\n", target.interface_number);
-        printf("  Usage:  %s / %s\n", target.UsagePageName().c_str(), target.UsageName().c_str());
-        printf("  InLen:  %lu  OutLen:  %lu  FeatLen:  %lu\n\n",
-               target.input_len, target.output_len, target.feature_len);
+        const auto& candidate = devices[ci];
 
-        /* Try all three access modes */
-        printf("--- Open attempts ---\n");
-        auto rw   = TryOpenDevice(target.path.c_str(), GENERIC_READ | GENERIC_WRITE);
-        auto ro   = TryOpenDevice(target.path.c_str(), GENERIC_READ);
-        auto zero = TryOpenDevice(target.path.c_str(), 0);
-
-        PrintAccessResult("  ", rw);
-        PrintAccessResult("  ", ro);
-        PrintAccessResult("  ", zero);
-
-        printf("\n--- Battery query ---\n");
-
-        /* Try feature report with dwAccess=0 handle first (if opened) */
-        if (zero.opened)
+        /* Skip collections that obviously can't do 90-byte Razer protocol:
+           mouse/keyboard input-only (InLen <= 16, OutLen=0, no FeatLen) */
+        if (candidate.IsMouse() && candidate.feature_len == 0 && candidate.output_len == 0)
         {
-            printf("  Trying feature report (dwAccess=0)...\n");
-            int pct = 0; bool chg = false, chg_known = false;
-            if (TryReadBatteryViaFeature(zero.handle, pct, chg, chg_known))
+            /* Mouse interface with only input — skip (it's the system mouse) */
+            continue;
+        }
+
+        printf("--- Trying [%zu] PID 0x%04X MI=%d %s/%s ---\n",
+               ci, candidate.pid, candidate.interface_number,
+               candidate.UsagePageName().c_str(),
+               candidate.UsageName().c_str());
+        printf("  InLen=%lu OutLen=%lu FeatLen=%lu\n",
+               candidate.input_len, candidate.output_len, candidate.feature_len);
+
+        /* Try all access modes */
+        auto rw   = TryOpenDevice(candidate.path.c_str(), GENERIC_READ | GENERIC_WRITE);
+        auto ro   = TryOpenDevice(candidate.path.c_str(), GENERIC_READ);
+        auto zero = TryOpenDevice(candidate.path.c_str(), 0);
+
+        PrintAccessResult("  R+W", rw);
+        PrintAccessResult("  R  ", ro);
+        PrintAccessResult("  =0 ", zero);
+
+        HANDLE h_best = NULL;
+        const char* access_method = NULL;
+
+        /* Prefer zero-access handle (always works for feature reports if HID driver allows) */
+        if (zero.opened) { h_best = zero.handle; access_method = "dwAccess=0 feat"; }
+        else if (rw.opened) { h_best = rw.handle; access_method = "R+W write/read"; }
+        else if (ro.opened) { h_best = ro.handle; access_method = "R write/read"; }
+
+        if (!h_best)
+        {
+            printf("  ❌ Cannot open\n\n");
+            continue;
+        }
+
+        /* Try feature report first (works with dwAccess=0) */
+        bool feature_worked = false;
+        if (candidate.feature_len >= 64)
+        {
+            printf("  → Feature report...\n");
+            int pct = 0; bool chg = false, chg_k = false;
+            if (TryReadBatteryViaFeature(h_best, pct, chg, chg_k) && pct > 0)
             {
-                printf("\n  ✅ Battery via FEATURE REPORT:\n");
+                feature_worked = true;
+                printf("\n  ✅ BATTERY via feature report (%s)\n", access_method);
                 printf("     Level: %d%%\n", pct);
-                if (chg_known) printf("     Charging: %s\n", chg ? "Yes" : "No");
+                if (chg_k) printf("     Charging: %s\n", chg ? "Yes" : "No");
+                printf("     Interface: MI=%d\n\n", candidate.interface_number);
+            }
+        }
+
+        /* Try write/read if feature didn't work and we have R+W access */
+        if (!feature_worked && rw.opened && candidate.output_len >= 90)
+        {
+            printf("  → WriteFile/ReadFile...\n");
+            int pct = 0; bool chg = false, chg_k = false;
+            if (TryReadBatteryViaWriteRead(rw.handle, pct, chg, chg_k) && pct > 0)
+            {
+                printf("\n  ✅ BATTERY via WriteFile/ReadFile\n");
+                printf("     Level: %d%%\n", pct);
+                if (chg_k) printf("     Charging: %s\n", chg ? "Yes" : "No");
+                printf("     Interface: MI=%d\n\n", candidate.interface_number);
             }
             else
             {
-                printf("  ❌ Feature report failed\n");
+                printf("  ❌\n");
             }
-            CloseHandle(zero.handle);
         }
 
-        /* Try write/read with R+W handle */
-        if (rw.opened)
+        if (!feature_worked && !rw.opened)
         {
-            printf("  Trying WriteFile/ReadFile (Read+Write)...\n");
-            int pct = 0; bool chg = false, chg_known = false;
-            if (TryReadBatteryViaWriteRead(rw.handle, pct, chg, chg_known))
-            {
-                printf("\n  ✅ Battery via WRITEFILE/READFILE:\n");
-                printf("     Level: %d%%\n", pct);
-                if (chg_known) printf("     Charging: %s\n", chg ? "Yes" : "No");
-            }
-            else
-            {
-                printf("  ❌ WriteFile/ReadFile failed\n");
-            }
-            CloseHandle(rw.handle);
+            printf("  ❌ No battery response\n");
         }
 
-        /* Try feature report with zero handle even if it failed */
-        if (!zero.opened)
-        {
-            printf("  (no zero-access handle available)\n");
-        }
-
-        if (!rw.opened && !zero.opened)
-        {
-            printf("\n  ❌ Could not open device with any access method.\n");
-            printf("     All attempts failed. The device may be:\n");
-            printf("     - held exclusively by another driver (Synapse, Windows HID driver)\n");
-            printf("     - require a different access approach\n");
-        }
+        /* Cleanup handles (don't close zero handle if also used as R+W) */
+        if (rw.opened && rw.handle != h_best) CloseHandle(rw.handle);
+        if (ro.opened && ro.handle != h_best && ro.handle != rw.handle) CloseHandle(ro.handle);
+        if (zero.opened && zero.handle != h_best) CloseHandle(zero.handle);
+        if (h_best) CloseHandle(h_best);
+        printf("\n");
     }
 
     printf("\n=== Done ===\n");
