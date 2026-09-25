@@ -4,6 +4,8 @@
 
 #include <QObject>
 #include <QTimer>
+#include <QMenu>
+#include <QAction>
 #include <QFutureWatcher>
 
 #include "OpenRGBPluginInterface.h"
@@ -45,6 +47,7 @@ private slots:
 private:
     void ScheduleNextPoll();
     void OnBatteryResult(const BatteryState& state);
+    void UpdateTrayMenu(const BatteryState& state);
     void SaveSettings();
     void LoadSettings();
 
@@ -56,8 +59,16 @@ private:
 
     QFutureWatcher<BatteryState>*   future_watcher_ = nullptr;
 
-    BatteryState                    last_state_;
+    /* Tray menu */
+    QMenu*          tray_menu_            = nullptr;
+    QAction*        tray_device_action_    = nullptr;
+    QAction*        tray_battery_action_   = nullptr;
+    QAction*        tray_connection_action_ = nullptr;
+    QAction*        tray_charging_action_  = nullptr;
+    QAction*        tray_refresh_action_   = nullptr;
 
-    int                             poll_interval_sec_ = 60;
-    bool                            log_enabled_       = true;
+    BatteryState    last_state_;
+
+    int             poll_interval_sec_ = 60;
+    bool            log_enabled_       = true;
 };

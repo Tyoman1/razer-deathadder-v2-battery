@@ -53,7 +53,28 @@ void BatteryPlugin::Load(OpenRGBPluginAPIInterface* plugin_api_ptr)
     widget_ = new SettingsWidget();
     connect(widget_, &SettingsWidget::refreshRequested, this, &BatteryPlugin::OnManualRefresh);
 
-    /* Polling timer (runs in GUI thread, but HID I/O is deferred to thread pool) */
+    /* ── Tray menu ── */
+    tray_menu_ = new QMenu("Battery Monitor");
+
+    tray_device_action_    = tray_menu_->addAction("Razer DeathAdder V2 Pro");
+    tray_device_action_->setEnabled(false);
+
+    tray_battery_action_   = tray_menu_->addAction("Battery: unavailable");
+    tray_battery_action_->setEnabled(false);
+
+    tray_connection_action_ = tray_menu_->addAction("Connection: Unknown");
+    tray_connection_action_->setEnabled(false);
+
+    tray_charging_action_  = tray_menu_->addAction("Charging: Unknown");
+    tray_charging_action_->setEnabled(false);
+
+    tray_menu_->addSeparator();
+
+    tray_refresh_action_   = tray_menu_->addAction("Refresh battery");
+    connect(tray_refresh_action_, &QAction::triggered,
+            this, &BatteryPlugin::OnManualRefresh);
+
+    /* ── Polling timer (runs in GUI thread, HID I/O deferred to thread pool) ── */
     poll_timer_ = new QTimer(this);
     connect(poll_timer_, &QTimer::timeout, this, &BatteryPlugin::OnPollTimer);
 
@@ -80,7 +101,7 @@ QWidget* BatteryPlugin::GetWidget()
 
 QMenu* BatteryPlugin::GetTrayMenu()
 {
-    return nullptr;
+    return tray_menu_;
 }
 
 void BatteryPlugin::Unload()
@@ -107,6 +128,14 @@ void BatteryPlugin::Unload()
         delete provider_;
         provider_ = nullptr;
     }
+
+    /* Tray menu: OpenRGB owns the returned QMenu and its QActions */
+    tray_menu_        = nullptr;
+    tray_device_action_ = nullptr;
+    tray_battery_action_ = nullptr;
+    tray_connection_action_ = nullptr;
+    tray_charging_action_  = nullptr;
+    tray_refresh_action_   = nullptr;
 
     refresh_in_progress_ = false;
     widget_ = nullptr; /* OpenRGB owns the widget */
@@ -139,6 +168,9 @@ void BatteryPlugin::OnPollTimer()
 
     refresh_in_progress_ = true;
 
+    if (tray_refresh_action_)
+        tray_refresh_action_->setText("Refresh battery (updating...)");
+
     /* Defer HID I/O to a thread-pool worker */
     future_watcher_ = new QFutureWatcher<BatteryState>(this);
     connect(future_watcher_, &QFutureWatcher<BatteryState>::finished,
@@ -166,6 +198,9 @@ void BatteryPlugin::OnManualRefresh()
 void BatteryPlugin::OnBatteryResult(const BatteryState& state)
 {
     refresh_in_progress_ = false;
+
+    if (tray_refresh_action_)
+        tray_refresh_action_->setText("Refresh battery");
 
     if (!widget_) return;
 
@@ -199,8 +234,47 @@ void BatteryPlugin::OnBatteryResult(const BatteryState& state)
                            "%s", "DeathAdder V2 Pro battery read failed");
     }
 
+    UpdateTrayMenu(state);
+
     /* Keep polling — device may reappear */
     ScheduleNextPoll();
+}
+
+/*---------------------------------------------------------*\
+| Tray menu update                                           |
+\*---------------------------------------------------------*/
+void BatteryPlugin::UpdateTrayMenu(const BatteryState& state)
+{
+    if (!tray_battery_action_) return;
+
+    if (state.available)
+    {
+        tray_battery_action_->setText(
+            QString("Battery: %1%").arg(state.percent));
+
+        tray_connection_action_->setText(
+            QString("Connection: %1").arg(state.wired ? "Wired" : "Wireless"));
+
+        if (state.charging_known)
+            tray_charging_action_->setText(
+                QString("Charging: %1").arg(state.charging ? "Yes" : "No"));
+        else
+            tray_charging_action_->setText("Charging: Unknown");
+    }
+    else if (last_state_.last_known)
+    {
+        tray_battery_action_->setText(
+            QString("Battery: %1% (last known)").arg(last_state_.percent));
+
+        tray_connection_action_->setText("Connection: Unknown");
+        tray_charging_action_->setText("Charging: Unknown");
+    }
+    else
+    {
+        tray_battery_action_->setText("Battery: unavailable");
+        tray_connection_action_->setText("Connection: Unknown");
+        tray_charging_action_->setText("Charging: Unknown");
+    }
 }
 
 /*---------------------------------------------------------*\
