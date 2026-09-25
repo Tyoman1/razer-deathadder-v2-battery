@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <QTimer>
+#include <QFutureWatcher>
 
 #include "OpenRGBPluginInterface.h"
 #include "DeathAdderV2ProBatteryProvider.h"
@@ -42,7 +43,8 @@ private slots:
     void OnManualRefresh();
 
 private:
-    void DoBatteryRead();
+    void ScheduleNextPoll();
+    void OnBatteryResult(const BatteryState& state);
     void SaveSettings();
     void LoadSettings();
 
@@ -51,6 +53,8 @@ private:
     DeathAdderV2ProBatteryProvider* provider_   = nullptr;
     QTimer*                         poll_timer_ = nullptr;
     bool                            refresh_in_progress_ = false;
+
+    QFutureWatcher<BatteryState>*   future_watcher_ = nullptr;
 
     BatteryState                    last_state_;
 

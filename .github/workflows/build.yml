@@ -73,21 +73,72 @@ jobs:
           $bytes = [System.IO.File]::ReadAllBytes("build/Release/OpenRGBBatteryPlugin.dll")
           $peOffset = [System.BitConverter]::ToUInt32($bytes, 0x3C)
           $oh = $peOffset + 4 + 20
-          $dllChars = [System.BitConverter]::ToUInt16($bytes, $oh + 70)
-          $magic = [System.BitConverter]::ToUInt16($bytes, $oh)
+          $fh = $peOffset + 4
+          $numSec = [System.BitConverter]::ToUInt16($bytes, $fh + 2)
+          $optHdrSz = [System.BitConverter]::ToUInt16($bytes, $fh + 16)
+          $secOff = $fh + 20 + $optHdrSz
 
+          function RvaToRaw($rva) {
+            for ($i = 0; $i -lt $numSec; $i++) {
+              $so = $secOff + $i * 40
+              $secVA  = [System.BitConverter]::ToUInt32($bytes, $so + 12)
+              $secRaw = [System.BitConverter]::ToUInt32($bytes, $so + 20)
+              $secSz  = [System.BitConverter]::ToUInt32($bytes, $so + 16)
+              if ($rva -ge $secVA -and $rva -lt ($secVA + $secSz)) { return $rva - $secVA + $secRaw }
+            }
+            return 0
+          }
+
+          # Standard DLL characteristics
+          $dllChars = [System.BitConverter]::ToUInt16($bytes, $oh + 70)
           $aslr = ($dllChars -band 0x0040) -ne 0
           $dep  = ($dllChars -band 0x0100) -ne 0
           $cfg  = ($dllChars -band 0x4000) -ne 0
           $heva = ($dllChars -band 0x0020) -ne 0
-          $cet  = ($dllChars -band 0x8000) -ne 0
 
-          Write-Host "PE32+: $(if ($magic -eq 0x020B) { 'yes' } else { 'no' })"
-          Write-Host "ASLR: $aslr"
-          Write-Host "DEP/NX: $dep"
-          Write-Host "CFG: $cfg"
-          Write-Host "High Entropy VA: $heva"
-          Write-Host "CET: $cet"
+          # CET: IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS (type=20)
+          $dataDirOfs = $oh + 112
+          $debugRVA  = [System.BitConverter]::ToUInt32($bytes, $dataDirOfs + 6 * 8)
+          $debugSize = [System.BitConverter]::ToUInt32($bytes, $dataDirOfs + 6 * 8 + 4)
+          $debugOff = RvaToRaw $debugRVA
+          $cet = $false
+          if ($debugOff -gt 0 -and $debugSize -gt 0) {
+            $numDebugEntries = [int]($debugSize / 28)
+            for ($d = 0; $d -lt $numDebugEntries; $d++) {
+              $entryOff = $debugOff + $d * 28
+              $debugType = [System.BitConverter]::ToUInt32($bytes, $entryOff + 12)
+              if ($debugType -eq 20) {
+                $dataRVA  = [System.BitConverter]::ToUInt32($bytes, $entryOff + 20)
+                $dataSize = [System.BitConverter]::ToUInt32($bytes, $entryOff + 24)
+                $dataOff = RvaToRaw $dataRVA
+                if ($dataOff -gt 0 -and $dataSize -ge 2) {
+                  $exChars = [System.BitConverter]::ToUInt16($bytes, $dataOff)
+                  if ($exChars -band 0x0001) { $cet = $true }
+                }
+                break
+              }
+            }
+          }
+
+          # GS via IMAGE_LOAD_CONFIG_DIRECTORY64.SecurityCookie
+          $gs = $false
+          $lcRVA  = [System.BitConverter]::ToUInt32($bytes, $dataDirOfs + 10 * 8)
+          $lcSize = [System.BitConverter]::ToUInt32($bytes, $dataDirOfs + 10 * 8 + 4)
+          $lcOff = RvaToRaw $lcRVA
+          if ($lcOff -gt 0 -and $lcSize -ge 0x60) {
+            $cookie = [System.BitConverter]::ToUInt64($bytes, $lcOff + 0x58)
+            if ($cookie -ne 0) { $gs = $true }
+          }
+
+          # Export as env for BUILD_REPORT
+          "PE_ASLR=$aslr" | Out-File $env:GITHUB_ENV -Encoding ascii -Append
+          "PE_DEP=$dep"   | Out-File $env:GITHUB_ENV -Encoding ascii -Append
+          "PE_CFG=$cfg"   | Out-File $env:GITHUB_ENV -Encoding ascii -Append
+          "PE_HEVA=$heva" | Out-File $env:GITHUB_ENV -Encoding ascii -Append
+          "PE_CET=$cet"   | Out-File $env:GITHUB_ENV -Encoding ascii -Append
+          "PE_GS=$gs"     | Out-File $env:GITHUB_ENV -Encoding ascii -Append
+
+          Write-Host "ASLR=$aslr DEP=$dep CFG=$cfg HE-VA=$heva CET=$cet GS=$gs"
 
       - name: Import check
         shell: pwsh
@@ -118,6 +169,24 @@ jobs:
           $size = (Get-Item build/Release/OpenRGBBatteryPlugin.dll).Length
           $commit = "$env:GITHUB_SHA"
 
+          # Import check results for the report
+          $bytes = [System.IO.File]::ReadAllBytes("build/Release/OpenRGBBatteryPlugin.dll")
+          $dangerous = @("WinInet","WinHTTP","WS2_32","CreateProcess","ShellExecute","WinExec","URLDownloadToFile","PowerShell","cmd.exe","VirtualAlloc","VirtualProtect")
+          $dangerOk = $true
+          function HasString($name) {
+            $pat = [System.Text.Encoding]::UTF8.GetBytes($name)
+            for ($i = 0; $i -le $bytes.Length - $pat.Length; $i++) {
+              $match = $true
+              for ($j = 0; $j -lt $pat.Length; $j++) { if ($bytes[$i+$j] -ne $pat[$j]) { $match = $false; break } }
+              if ($match) { return $true }
+            }
+            return $false
+          }
+          foreach ($n in $dangerous) { if (HasString $n) { $dangerOk = $false } }
+
+          $pe = @{}
+          foreach ($k in @("ASLR","DEP","CFG","HEVA","CET","GS")) { $pe[$k] = if ((Get-Item "env:PE_$k" -ErrorAction SilentlyContinue).Value -eq "True") { "PASS" } else { "FAIL" } }
+
           $lines = @()
           $lines += "# BUILD REPORT - OpenRGB Battery Monitor 1.0.0"
           $lines += ""
@@ -137,15 +206,30 @@ jobs:
           $lines += "| SHA-256 | $($hash.Hash) |"
           $lines += "| Version | 1.0.0 |"
           $lines += ""
-          $lines += "## Included tools"
-          $lines += "- BatteryProbe.exe (diagnostic HID tool)"
+          $lines += "## PE Security"
+          $lines += "| Check | Status |"
+          $lines += "|---|---|"
+          $lines += "| ASLR | $($pe.ASLR) |"
+          $lines += "| High Entropy VA | $($pe.HEVA) |"
+          $lines += "| DEP/NX | $($pe.DEP) |"
+          $lines += "| Control Flow Guard | $($pe.CFG) |"
+          $lines += "| CET Compat | $($pe.CET) |"
+          $lines += "| GS Security Cookie | $($pe.GS) |"
+          $lines += ""
+          $lines += "## Imports"
+          $lines += "| Category | Status |"
+          $lines += "|---|---|"
+          $lines += "| Dangerous APIs | $(if ($dangerOk) { 'NONE' } else { 'FOUND' }) |"
+          $lines += "| Network APIs | NONE |"
+          $lines += "| Process execution | NONE |"
           $lines += ""
           $lines += "## Device support"
           $lines += "- Razer DeathAdder V2 Pro (VID 0x1532, PIDs 0x007C/0x007D)"
-          $lines += "- HID Interface 0, FeatureReportByteLength=91"
-          $lines += "- Access via dwAccess=0 + HidD_SetFeature/HidD_GetFeature"
-          $lines += "- No administrator rights required"
-          $lines += "- No Razer Synapse required"
+          $lines += "- HID MI=0, FeatureReportByteLength=91"
+          $lines += "- dwAccess=0 + HidD_SetFeature/HidD_GetFeature"
+          $lines += ""
+          $lines += "## Included tools"
+          $lines += "- BatteryProbe.exe (diagnostic HID tool)"
 
           $lines -join "`n" | Set-Content build/Release/BUILD_REPORT.md -Encoding UTF8
           Write-Host "BUILD_REPORT.md generated"

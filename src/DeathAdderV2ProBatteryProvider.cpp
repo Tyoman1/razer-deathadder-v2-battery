@@ -314,6 +314,7 @@ BatteryState DeathAdderV2ProBatteryProvider::ReadBattery()
         uint8_t resp[REPORT_SIZE];
         memcpy(resp, in_buf + 1, REPORT_SIZE);
 
+        /* ── Validation ── */
         /* CRC check */
         uint8_t expected_crc = ComputeCrc(resp);
         if (resp[88] != expected_crc)
@@ -325,6 +326,14 @@ BatteryState DeathAdderV2ProBatteryProvider::ReadBattery()
             if (resp[0] == 0x01) { Sleep(200); continue; } /* busy */
             continue;
         }
+
+        /* Transaction ID must match request */
+        if (resp[1] != req[1])
+            continue;
+
+        /* Command class must match request */
+        if (resp[6] != req[6] || resp[7] != req[7])
+            continue;
 
         uint8_t raw = resp[9];
         state.percent = RawToPercent(raw);

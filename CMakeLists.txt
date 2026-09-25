@@ -34,6 +34,7 @@ target_link_libraries(OpenRGBBatteryPlugin PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Concurrent
     nlohmann_json::nlohmann_json
     setupapi.lib
     hid.lib

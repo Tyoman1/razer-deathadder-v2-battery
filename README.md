@@ -21,9 +21,10 @@ OpenRGB plugin for monitoring **Razer DeathAdder V2 Pro** battery level.
 
 ## How it works
 
-- Reads battery via Windows HID **feature report** (not write/read)
-- Uses `dwAccess=0` + `HidD_SetFeature`/`HidD_GetFeature`
+- Queries battery via Windows HID **feature report**
+- Uses `dwAccess=0` + `HidD_SetFeature`/`HidD_GetFeature` (query-only; does not use GENERIC_READ/WRITE)
 - Works on HID Interface 0 (Mouse), FeatureReportByteLength=91
+- **Does not modify** RGB, DPI, device settings or firmware
 - **Does not require** administrator rights
 - **Does not require** Razer Synapse
 - **Does not conflict** with OpenRGB RGB control (same interface, different access mode)
