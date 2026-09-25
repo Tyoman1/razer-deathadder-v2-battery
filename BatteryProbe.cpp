@@ -613,15 +613,19 @@ int main()
 
     printf("Found %zu HID collection(s):\n\n", devices.size());
 
-    printf("%-3s  %-6s  %-3s  %-8s  %-6s  %-25s  %-25s  %-5s  %-5s  %-5s\n",
+    printf("%-3s  %-6s  %-3s  %-8s  %-6s  %-25s  %-25s  %-5s  %-5s\n",
            "#", "PID", "MI", "InLen", "OutLen", "Usage Page", "Usage", "Feat",
-           "Mouse?", "Batt?");
-    printf("%-3s  %-6s  %-3s  %-8s  %-6s  %-25s  %-25s  %-5s  %-5s  %-5s\n",
+           "Type");
+    printf("%-3s  %-6s  %-3s  %-8s  %-6s  %-25s  %-25s  %-5s  %-5s\n",
            "---", "------", "---", "-------", "------",
            "-------------------------", "-------------------------",
-           "-----", "------", "------");
+           "-----", "------");
 
-    int candidate_idx = -1;
+    for (size_t i = 0; i < devices.size(); i++)
+    {
+        const auto& d = devices[i];
+        bool mouse = d.IsMouse();
+        bool kbd = d.IsKeyboard();
 
         char pid_str[16];
         sprintf_s(pid_str, "0x%04X", d.pid);
@@ -632,8 +636,7 @@ int main()
                d.UsagePageName().c_str(),
                d.UsageName().c_str(),
                d.feature_len,
-               mouse ? "MOUSE" : (kbd ? "KBD" : ""),
-               batt_candidate ? "CAND" : "");
+               mouse ? "MOUSE" : (kbd ? "KBD" : ""));
     }
 
     /* Phase 2: try battery read on ALL interfaces */
