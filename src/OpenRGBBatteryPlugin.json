@@ -1,0 +1,8 @@
+{
+    "OpenRGBPluginAPIVersion": 5,
+    "Id": "org.openrgb.battery-monitor",
+    "Name": "Razer Device Battery",
+    "Description": "Displays Razer DeathAdder V2 Pro battery level via HID feature report",
+    "VersionStr": "1.0.0",
+    "Url": "https://github.com/Tyoman1/razer-deathadder-v2-battery"
+}

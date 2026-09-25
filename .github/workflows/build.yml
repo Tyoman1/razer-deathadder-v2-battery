@@ -8,21 +8,168 @@ on:
 jobs:
   build:
     runs-on: windows-2022
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build BatteryProbe
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Qt 6.8.3
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check aqtinstall==3.3.0
+          python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 --outputdir "$env:RUNNER_TEMP\Qt"
+          "Qt6_DIR=$env:RUNNER_TEMP\Qt\6.8.3\msvc2022_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding ascii
+
+      - name: Configure
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $cmake = "$vsPath\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-          & $cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-          & $cmake --build build --config Release
+          & $cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DCMAKE_PREFIX_PATH=$env:Qt6_DIR"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $cmake = "$vsPath\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+          & $cmake --build build --config Release --parallel 4
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Upload
+      - name: Verify plugin DLL
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build/Release/OpenRGBBatteryPlugin.dll)) {
+            Write-Host "::error::Plugin DLL not found"
+            exit 1
+          }
+          $size = (Get-Item build/Release/OpenRGBBatteryPlugin.dll).Length
+          Write-Host "✅ OpenRGBBatteryPlugin.dll: $size bytes"
+
+      - name: Verify BatteryProbe
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build/Release/BatteryProbe.exe)) {
+            Write-Host "::error::BatteryProbe.exe not found"
+            exit 1
+          }
+          $size = (Get-Item build/Release/BatteryProbe.exe).Length
+          Write-Host "✅ BatteryProbe.exe: $size bytes"
+
+      - name: SHA-256
+        shell: pwsh
+        run: |
+          $hash = Get-FileHash build/Release/OpenRGBBatteryPlugin.dll -Algorithm SHA256
+          "$($hash.Hash)  OpenRGBBatteryPlugin.dll" | Out-File build/Release/OpenRGBBatteryPlugin.sha256.txt -Encoding ascii
+
+      - name: PE security analysis
+        shell: pwsh
+        run: |
+          $bytes = [System.IO.File]::ReadAllBytes("build/Release/OpenRGBBatteryPlugin.dll")
+          $peOffset = [System.BitConverter]::ToUInt32($bytes, 0x3C)
+          $oh = $peOffset + 4 + 20
+          $dllChars = [System.BitConverter]::ToUInt16($bytes, $oh + 70)
+          $magic = [System.BitConverter]::ToUInt16($bytes, $oh)
+
+          $aslr = ($dllChars -band 0x0040) -ne 0
+          $dep  = ($dllChars -band 0x0100) -ne 0
+          $cfg  = ($dllChars -band 0x4000) -ne 0
+          $heva = ($dllChars -band 0x0020) -ne 0
+          $cet  = ($dllChars -band 0x8000) -ne 0
+
+          Write-Host "PE32+: $(if ($magic -eq 0x020B) { 'yes' } else { 'no' })"
+          Write-Host "ASLR: $aslr"
+          Write-Host "DEP/NX: $dep"
+          Write-Host "CFG: $cfg"
+          Write-Host "High Entropy VA: $heva"
+          Write-Host "CET: $cet"
+
+      - name: Import check
+        shell: pwsh
+        run: |
+          $bytes = [System.IO.File]::ReadAllBytes("build/Release/OpenRGBBatteryPlugin.dll")
+          $expected = @("KERNEL32","USER32","Qt6Core","Qt6Gui","Qt6Widgets","MSVCP","VCRUNTIME")
+          $dangerous = @("WinInet","WinHTTP","WS2_32","CreateProcess","ShellExecute","WinExec","URLDownloadToFile","PowerShell","cmd.exe","VirtualAlloc","VirtualProtect")
+
+          function Find($name) {
+            $pat = [System.Text.Encoding]::UTF8.GetBytes($name)
+            for ($i = 0; $i -le $bytes.Length - $pat.Length; $i++) {
+              $match = $true
+              for ($j = 0; $j -lt $pat.Length; $j++) { if ($bytes[$i+$j] -ne $pat[$j]) { $match = $false; break } }
+              if ($match) { return $true }
+            }
+            return $false
+          }
+
+          foreach ($n in $expected) { Write-Host "  $n : $(if (Find $n) { 'OK' } else { 'NOT FOUND' })" }
+          $allOk = $true
+          foreach ($n in $dangerous) { if (Find $n) { Write-Host "::error::DANGEROUS: $n"; $allOk = $false } }
+          if ($allOk) { Write-Host "  Dangerous APIs: none" }
+
+      - name: Generate BUILD_REPORT.md
+        shell: pwsh
+        run: |
+          $hash = Get-FileHash build/Release/OpenRGBBatteryPlugin.dll -Algorithm SHA256
+          $size = (Get-Item build/Release/OpenRGBBatteryPlugin.dll).Length
+          $commit = "$env:GITHUB_SHA"
+
+          $lines = @()
+          $lines += "# BUILD REPORT - OpenRGB Battery Monitor 1.0.0"
+          $lines += ""
+          $lines += "## Source"
+          $lines += "| Field | Value |"
+          $lines += "|---|---|"
+          $lines += "| Repository | https://github.com/$env:GITHUB_REPOSITORY |"
+          $lines += "| Branch | $env:GITHUB_REF_NAME |"
+          $lines += "| Commit | $commit |"
+          $lines += "| Run ID | $env:GITHUB_RUN_ID |"
+          $lines += ""
+          $lines += "## Binary"
+          $lines += "| Field | Value |"
+          $lines += "|---|---|"
+          $lines += "| File | OpenRGBBatteryPlugin.dll |"
+          $lines += "| Size | $size bytes |"
+          $lines += "| SHA-256 | $($hash.Hash) |"
+          $lines += "| Version | 1.0.0 |"
+          $lines += ""
+          $lines += "## Included tools"
+          $lines += "- BatteryProbe.exe (diagnostic HID tool)"
+          $lines += ""
+          $lines += "## Device support"
+          $lines += "- Razer DeathAdder V2 Pro (VID 0x1532, PIDs 0x007C/0x007D)"
+          $lines += "- HID Interface 0, FeatureReportByteLength=91"
+          $lines += "- Access via dwAccess=0 + HidD_SetFeature/HidD_GetFeature"
+          $lines += "- No administrator rights required"
+          $lines += "- No Razer Synapse required"
+
+          $lines -join "`n" | Set-Content build/Release/BUILD_REPORT.md -Encoding UTF8
+          Write-Host "BUILD_REPORT.md generated"
+
+      - name: Create source archive
+        shell: pwsh
+        run: |
+          git archive --format=zip --output="build/Release/OpenRGBBatteryPlugin-1.0.0-source.zip" HEAD
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BatteryProbe
-          path: build/Release/BatteryProbe.exe
+          name: OpenRGBBatteryPlugin-1.0.0
+          path: |
+            build/Release/OpenRGBBatteryPlugin.dll
+            build/Release/OpenRGBBatteryPlugin.sha256.txt
+            build/Release/BUILD_REPORT.md
+            build/Release/OpenRGBBatteryPlugin-1.0.0-source.zip
+            build/Release/BatteryProbe.exe
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: "*.log"
+          if-no-files-found: ignore
