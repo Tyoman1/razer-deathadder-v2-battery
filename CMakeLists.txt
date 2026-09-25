@@ -58,3 +58,8 @@ if(MSVC)
         MSVC_RUNTIME_LIBRARY "MultiThreaded"
     )
 endif()
+
+# BatteryProbe has no Qt/QObjects, disable AUTOMOC
+set_target_properties(BatteryProbe PROPERTIES
+    AUTOMOC OFF
+)
