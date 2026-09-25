@@ -6,9 +6,9 @@
 #include <QTimer>
 
 #include "OpenRGBPluginInterface.h"
+#include "DeathAdderV2ProBatteryProvider.h"
 
 class SettingsWidget;
-class DeathAdderV2ProBatteryProvider;
 
 class BatteryPlugin : public QObject, public OpenRGBPluginInterface
 {
