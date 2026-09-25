@@ -202,20 +202,38 @@ bool DeathAdderV2ProBatteryProvider::Start()
     std::string path;
     bool w = false;
 
-    /* Try wired first */
-    if (!FindDevicePath(true, path, w))
-        return false;
+    /* Try wireless first (dongle is usually always present),
+       fall back to wired */
+    if (FindDevicePath(false, path, w))
+    {
+        HANDLE h = CreateFileA(path.c_str(), 0,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL, OPEN_EXISTING, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            hid_handle_ = reinterpret_cast<void*>(h);
+            wired_ = w;
+            running_ = true;
+            return true;
+        }
+    }
 
-    HANDLE h = CreateFileA(path.c_str(), 0,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE)
-        return false;
+    /* Try wired */
+    if (FindDevicePath(true, path, w))
+    {
+        HANDLE h = CreateFileA(path.c_str(), 0,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL, OPEN_EXISTING, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            hid_handle_ = reinterpret_cast<void*>(h);
+            wired_ = w;
+            running_ = true;
+            return true;
+        }
+    }
 
-    hid_handle_ = reinterpret_cast<void*>(h);
-    wired_ = w;
-    running_ = true;
-    return true;
+    return false;
 }
 
 void DeathAdderV2ProBatteryProvider::Stop()
@@ -259,10 +277,19 @@ BatteryState DeathAdderV2ProBatteryProvider::ReadBattery()
     out_buf[0] = 0; /* Report ID */
     memcpy(out_buf + 1, req, REPORT_SIZE);
 
+    bool device_gone = false;
+
     for (int retry = 0; retry < MAX_RETRIES; retry++)
     {
         if (!HidD_SetFeature(h, out_buf, FULL_BUF_SIZE))
         {
+            DWORD err = GetLastError();
+            if (err == ERROR_DEVICE_NOT_CONNECTED ||
+                err == ERROR_FILE_NOT_FOUND ||
+                err == ERROR_GEN_FAILURE)
+            {
+                device_gone = true;
+            }
             Sleep(IO_DELAY_MS);
             continue;
         }
@@ -273,7 +300,16 @@ BatteryState DeathAdderV2ProBatteryProvider::ReadBattery()
         in_buf[0] = 0;
 
         if (!HidD_GetFeature(h, in_buf, FULL_BUF_SIZE))
+        {
+            DWORD err = GetLastError();
+            if (err == ERROR_DEVICE_NOT_CONNECTED ||
+                err == ERROR_FILE_NOT_FOUND ||
+                err == ERROR_GEN_FAILURE)
+            {
+                device_gone = true;
+            }
             continue;
+        }
 
         uint8_t resp[REPORT_SIZE];
         memcpy(resp, in_buf + 1, REPORT_SIZE);
@@ -294,6 +330,13 @@ BatteryState DeathAdderV2ProBatteryProvider::ReadBattery()
         state.percent = RawToPercent(raw);
         state.available = true;
         break;
+    }
+
+    if (device_gone)
+    {
+        /* Device disconnected — close stale handle so Start() can re-open */
+        Stop();
+        return state;
     }
 
     if (!state.available)
