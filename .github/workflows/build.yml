@@ -140,6 +140,16 @@ jobs:
 
           Write-Host "ASLR=$aslr DEP=$dep CFG=$cfg HE-VA=$heva CET=$cet GS=$gs"
 
+          # Fail-closed: missing PE security flags are fatal for release builds
+          $peOk = $true
+          if (-not $aslr) { Write-Host "::error::ASLR missing"; $peOk = $false }
+          if (-not $heva) { Write-Host "::error::High Entropy VA missing"; $peOk = $false }
+          if (-not $dep)  { Write-Host "::error::DEP/NX missing"; $peOk = $false }
+          if (-not $cfg)  { Write-Host "::error::Control Flow Guard missing"; $peOk = $false }
+          if (-not $cet)  { Write-Host "::warning::CET not set (VS linker limitation)"; }
+          if (-not $gs)   { Write-Host "::warning::GS cookie not found (may be optimized in Release)"; }
+          if (-not $peOk) { exit 1 }
+
       - name: Import check
         shell: pwsh
         run: |
@@ -161,6 +171,7 @@ jobs:
           $allOk = $true
           foreach ($n in $dangerous) { if (Find $n) { Write-Host "::error::DANGEROUS: $n"; $allOk = $false } }
           if ($allOk) { Write-Host "  Dangerous APIs: none" }
+          if (-not $allOk) { exit 1 }
 
       - name: Generate BUILD_REPORT.md
         shell: pwsh

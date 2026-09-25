@@ -256,16 +256,18 @@ bool DeathAdderV2ProBatteryProvider::IsRunning() const
 \*---------------------------------------------------------*/
 BatteryState DeathAdderV2ProBatteryProvider::ReadBattery()
 {
-    BatteryState state;
-    state.wired = wired_;
-    state.available = false;
-
     if (!hid_handle_)
     {
         /* Device may have been replugged — try re-opening */
+        BatteryState state;
         if (!Start())
             return state;
     }
+
+    /* wired_ is now correct (Start() may have switched wireless↔wired) */
+    BatteryState state;
+    state.wired = wired_;
+    state.available = false;
 
     HANDLE h = reinterpret_cast<HANDLE>(hid_handle_);
 
@@ -372,13 +374,17 @@ BatteryState DeathAdderV2ProBatteryProvider::ReadBattery()
 
         uint8_t resp[REPORT_SIZE];
         memcpy(resp, in_buf + 1, REPORT_SIZE);
-        if (resp[88] != ComputeCrc(resp)) continue;
-        if (resp[0] == 0x02)
-        {
-            state.charging = (resp[9] != 0);
-            state.charging_known = true;
-            break;
-        }
+
+        /* Full validation matching battery-query standards */
+        if (resp[88] != ComputeCrc(resp))  continue;
+        if (resp[0]  != 0x02)              continue;  /* not success */
+        if (resp[1]  != req[1])            continue;  /* transaction ID mismatch */
+        if (resp[6]  != req[6])            continue;  /* command class mismatch */
+        if (resp[7]  != req[7])            continue;  /* command ID mismatch */
+
+        state.charging = (resp[9] != 0);
+        state.charging_known = true;
+        break;
     }
 
     return state;
